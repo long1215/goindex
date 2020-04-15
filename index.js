@@ -46,13 +46,32 @@ async function handleRequest(request) {
     let path = url.pathname;
     let action = url.searchParams.get('a');
 
-    if(path.substr(-1) == '/' || action != null){
-      return new Response(html,{status:200,headers:{'Content-Type':'text/html; charset=utf-8'}});
-    }else{
-      if(path.split('/').pop().toLowerCase() == ".password"){
-         return new Response("",{status:404});
+    if(path.substr(-1) == '/'){
+      try {
+        await gd.list(path);
+      } catch (e) {
+        return new Response("", { status: 404 }); // if path: /notexist/
+      }
+      return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    } else if(action != null){
+      if (await gd.file(path) == undefined){
+        return new Response(html404, { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      }
+      return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    } else {
+      if (path.split('/').pop().toLowerCase() == ".password") {
+        return new Response("", { status: 404 });
+      }
+      try {
+        await gd.file(path);
+      } catch (e) {
+        return new Response("", { status: 404 }); // if path: /notexist/notexist
       }
       let file = await gd.file(path);
+      if (file == undefined){
+        return new Response("", { status: 404 }); // if path: /exist/notexist
+      }
+      
       let range = request.headers.get('Range');
       return gd.down(file.id, range);
     }
@@ -76,7 +95,7 @@ async function apiRequest(request) {
           var obj = {};
         }
         console.log(password,obj);
-        if(password != obj.password){
+        if(password.replace("\n", "") != obj.password){
           let html = `{"error": {"code": 401,"message": "password error."}}`;
           return new Response(html,option);
         }
@@ -139,8 +158,21 @@ class googleDrive {
 
     // 通过reqeust cache 来缓存
     async list(path){
+      if (gd.cache == undefined) {
+        gd.cache = {};
+      }
+
+      if (gd.cache[path]) {
+        return gd.cache[path];
+      }
+
       let id = await this.findPathId(path);
-      return this._ls(id);
+      var obj = await this._ls(id);
+      if (obj.files && obj.files.length > 1000) {
+            gd.cache[path] = obj;
+      }
+
+      return obj
     }
 
     async password(path){
@@ -169,16 +201,29 @@ class googleDrive {
       if(parent==undefined){
         return null;
       }
-      let url = 'https://www.googleapis.com/drive/v3/files';
+      const files = [];
+      let pageToken;
+      let obj;
       let params = {'includeItemsFromAllDrives':true,'supportsAllDrives':true};
       params.q = `'${parent}' in parents and trashed = false AND name !='.password'`;
       params.orderBy= 'folder,name,modifiedTime desc';
       params.fields = "nextPageToken, files(id, name, mimeType, size , modifiedTime)";
       params.pageSize = 1000;
-      url += '?'+this.enQuery(params);
-      let requestOption = await this.requestOption();
-      let response = await fetch(url, requestOption);
-      let obj = await response.json();
+
+      do {
+        if (pageToken) {
+            params.pageToken = pageToken;
+        }
+        let url = 'https://www.googleapis.com/drive/v3/files';
+        url += '?'+this.enQuery(params);
+        let requestOption = await this.requestOption();
+        let response = await fetch(url, requestOption);
+        obj = await response.json();
+        files.push(...obj.files);
+        pageToken = obj.nextPageToken;
+      } while (pageToken);
+
+      obj.files = files;
       return obj;
     }
 
